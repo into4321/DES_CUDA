@@ -6,14 +6,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #define DES_BLOCKSIZE 8
 
-__global__ void desBlockOperation(char *in, int n)
+__global__ void desBlockOperation(char *in, char *out, int n)
 {
-	int i = threadIdx.x;
-	if (i < n)
+	int i = threadIdx.x * DES_BLOCKSIZE;
+	if(i < n)
 	{
-		in[i] = in[i]+1;
+		for (int j = i; j < i+DES_BLOCKSIZE && j < n; j++)
+		{
+			out[j] = in[j] + j%DES_BLOCKSIZE;
+		}
 	}
 }
 
@@ -24,41 +28,35 @@ int main()
 	struct _stat stat;
 	_stat(fileName,&stat);
 	int fileSize = stat.st_size;
-	FILE *fp = fopen(fileName , "r");
-	//TODO: Use as many blocks as neccessary
-	//Right now, there's just one(fine for files under 4KB)
-	char **thisBlock;
-	if(fp && &stat)
+	FILE *fp_in = fopen(fileName , "r");
+	char *h_text;
+	//TODO: Read the file in multiple chunks
+	if(fp_in && &stat)
 	{
-		thisBlock = (char **)malloc(512 * sizeof(char *));
-		
-		//Each thread is 64 bits = 8 bytes
-		//Each block is up to 512 threads
-		char s[DES_BLOCKSIZE];
-		int i = 0;
-		while ((fgets(s,DES_BLOCKSIZE,fp)) != NULL)
-		{
-			thisBlock[i] = (char *)malloc(sizeof(char *));
-			memcpy(thisBlock[i], s, DES_BLOCKSIZE);
-			i++;
-		}
-		fclose(fp);
+		h_text = (char *)malloc(fileSize);
+		char *s = (char *)malloc(sizeof(char *));
+		fread(h_text, fileSize, 1, fp_in);
+		fclose(fp_in);
 	}
-	if(thisBlock){
-		//Flatten the array
-		char *thisBlock_flat = &(thisBlock[0][0]);
-		//Allocate device memory
-		char *d_thisBlock = NULL;
-		char *result = (char *)malloc(512);
-		int size = 512 * sizeof(char *);
-		cudaMalloc(&d_thisBlock, size * DES_BLOCKSIZE);
-		cudaMemcpy(d_thisBlock, thisBlock_flat, size * DES_BLOCKSIZE, cudaMemcpyHostToDevice);
-		//number of items is filesize in bytes / 8
-		int n = (fileSize + DES_BLOCKSIZE - 1) / DES_BLOCKSIZE; 
-		//Invoke the kernel on this thread block
-		desBlockOperation<<<1, 512>>>(d_thisBlock, n);
-		cudaMemcpy(result, d_thisBlock, size, cudaMemcpyDeviceToHost);
-		int i = 0;
+	if(h_text){
+		//Allocate memory on the device
+		char *d_text = NULL;
+		cudaMalloc((void **) &d_text, fileSize);
+		//Copy input data to device
+		cudaMemcpy(d_text, h_text, fileSize, cudaMemcpyHostToDevice);
+		//Invoke kernel
+		int threadsPerBlock = (fileSize + DES_BLOCKSIZE -1) / DES_BLOCKSIZE;
+		desBlockOperation<<<1, threadsPerBlock>>>(d_text, d_text, fileSize);
+		//Copy data from device to host
+		cudaMemcpy(h_text, d_text, fileSize, cudaMemcpyDeviceToHost);
+		
+		//Write the output to a file
+		char *newFileName = "out.txt";
+		FILE *fp_out = fopen(newFileName, "w");
+		if(fp_out)
+		{
+			fwrite(h_text, fileSize, 1, fp_out);
+		}
 	}
     return 0;
 }
