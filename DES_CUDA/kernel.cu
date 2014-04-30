@@ -14,6 +14,8 @@
 #define MAX(X,Y) ((X) > (Y) ? (X) : (Y))
 #define KE_ROTWORD(x) (((x) << 8) | ((x) >> 24))
 
+#define ARGC_FOR_ENCRYPT 3
+
 /**************************** DATA TYPES ****************************/
 typedef unsigned char BYTE;            // 8-bit byte
 typedef unsigned int WORD;             // 32-bit word, change to "long" for 16-bit machines
@@ -489,43 +491,60 @@ __device__ void SubBytes(BYTE state[4][4])
 }
 
 
-int main()
+int main(int argc, char **argv)
 {
 	//copy the s-boxes to the device
 	cudaError_t result = cudaMemcpyToSymbol(d_aes_sbox, aes_sbox, sizeof(BYTE)*16*16);
-	//cudaMemcpyToSymbol("d_aes_sbox", &aes_sbox[0], sizeof(BYTE)*16*16, size_t(0), cudaMemcpyHostToDevice);
-	char *fileName = "Text.txt";
-	//Open the file for reading
-	struct _stat stat;
-	_stat(fileName,&stat);
-	long fileSize = stat.st_size;
-	FILE *fp_in = fopen(fileName , "r");
-	char *newFileName = "out.txt";
-	FILE *fp_out = fopen(newFileName, "ab");
-	char *h_chunkData;
-
-	//Create the key schedule
-	BYTE key[16] = {'S', 'E', 'C', 'R', 'E', 'T', ' ', 'K', 'E', 'Y', ' ', 'V', 'A', 'L', 'U', 'E'};
-	getKeySchedule(key);
 	
-	//Each kernel launch can handle 512 threads each operating on DES_BLOCKSIZE bytes
-	///So read the file in DES_BLOCKSIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH chunks
-	if(fp_in && &stat)
+	//Parse command line arguments
+	char *operation = argv[1];
+	if(strcmpi(operation, "encrypt") == 0)
 	{
-		
-		int chunkSize = AES_BLOCK_SIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH;
-		h_chunkData = (char *)malloc(chunkSize);
-		//Read the file in 1 chunk at a time, until fread returns something other than the chunk size
-		int lastChunkSize;
-		do
+		if(argc == ARGC_FOR_ENCRYPT)
 		{
-			lastChunkSize = fread(h_chunkData, 1, chunkSize, fp_in);
-			launchKernel(h_chunkData, lastChunkSize, fp_out);
-		}
-		while(lastChunkSize == chunkSize);
-		fclose(fp_in);
+			char *fileName = argv[2];
+
+			//Open the file for reading
+			struct _stat stat;
+			_stat(fileName,&stat);
+			long fileSize = stat.st_size;
+			FILE *fp_in = fopen(fileName , "r");
+			char *newFileName = "out.txt";
+			FILE *fp_out = fopen(newFileName, "ab");
+			char *h_chunkData;
+
+			//Create the key schedule
+			BYTE key[16] = {'S', 'E', 'C', 'R', 'E', 'T', ' ', 'K', 'E', 'Y', ' ', 'V', 'A', 'L', 'U', 'E'};
+			getKeySchedule(key);
+	
+			//Each kernel launch can handle 512 threads each operating on DES_BLOCKSIZE bytes
+			///So read the file in DES_BLOCKSIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH chunks
+			if(fp_in && &stat)
+			{
+				int chunkSize = AES_BLOCK_SIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH;
+				h_chunkData = (char *)malloc(chunkSize);
+				//Read the file in 1 chunk at a time, until fread returns something other than the chunk size
+				int lastChunkSize;
+				do
+				{
+					lastChunkSize = fread(h_chunkData, 1, chunkSize, fp_in);
+					launchKernel(h_chunkData, lastChunkSize, fp_out);
+				}
+				while(lastChunkSize == chunkSize);
+				fclose(fp_in);
 		
+			}
+		}
 	}
+	else if(strcmpi(operation, "decrypt") == 0)
+	{
+
+	}
+	else
+	{
+		puts("Invalid operation specified. Valid choices are \"encrypt\" and \"decrypt\".");
+	}
+	
     return 0;
 }
 
