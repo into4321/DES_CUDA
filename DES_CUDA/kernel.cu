@@ -15,17 +15,26 @@
 #define KE_ROTWORD(x) (((x) << 8) | ((x) >> 24))
 
 #define ARGC_FOR_ENCRYPT 3
+#define ARGC_FOR_DECRYPT 3
 
 /**************************** DATA TYPES ****************************/
 typedef unsigned char BYTE;            // 8-bit byte
 typedef unsigned int WORD;             // 32-bit word, change to "long" for 16-bit machines
 
-void launchKernel(char *h_chunk, int chunkSize, FILE *fp_out);
+void launchKernel(char *fileName, void(*kernel)(BYTE*, BYTE*, int));
 __device__ void AddRoundKey(BYTE state[4][4], const WORD w[]);
+
 __device__ void SubBytes(BYTE state[4][4]);
+__device__ void InvSubBytes(BYTE state[4][4]);
+
 __device__ void ShiftRows(BYTE state[4][4]);
+__device__ void InvShiftRows(BYTE state[4][4]);
+
 __device__ void MixColumns(BYTE state[4][4]);
+__device__ void InvMixColumns(BYTE state[4][4]);
+
 __device__ void aes_encrypt(const BYTE in[], BYTE out[], const WORD key[], int keysize);
+__device__ void aes_decrypt(const BYTE in[], BYTE out[], const WORD key[], int keysize);
 void aes_key_setup(const BYTE key[], WORD w[], int keysize);
 void getKeySchedule(BYTE *key);
 WORD SubWord(WORD word);
@@ -209,7 +218,7 @@ __device__ static const BYTE gf_mul[256][6] = {
 };
 
 
-__global__ void aesBlockOperation(BYTE *in, BYTE *out, int n)
+__global__ void cuda_aes_encrypt(BYTE *in, BYTE *out, int n)
 {
 	//Map the thread id and block id to the DES block
 	int i = ((blockIdx.x * THREADS_PER_BLOCK) + threadIdx.x) * AES_BLOCK_SIZE;
@@ -220,6 +229,16 @@ __global__ void aesBlockOperation(BYTE *in, BYTE *out, int n)
 	}
 }
 
+__global__ void cuda_aes_decrypt(BYTE *in, BYTE *out, int n)
+{
+	//Map the thread id and block id to the DES block
+	int i = ((blockIdx.x * THREADS_PER_BLOCK) + threadIdx.x) * AES_BLOCK_SIZE;
+	if(i < n)
+	{
+		//Call the encrypt function on the current 16-byte block
+		aes_decrypt(&in[i], &out[i], d_keySchedule, 128);
+	}
+}
 /////////////////
 // (En/De)Crypt
 /////////////////
@@ -297,6 +316,74 @@ __device__ void aes_encrypt(const BYTE in[], BYTE out[], const WORD key[], int k
 	out[15] = state[3][3];
 }
 
+__device__ void aes_decrypt(const BYTE in[], BYTE out[], const WORD key[], int keysize)
+{
+	BYTE state[4][4];
+
+	// Copy the input to the state.
+	state[0][0] = in[0];
+	state[1][0] = in[1];
+	state[2][0] = in[2];
+	state[3][0] = in[3];
+	state[0][1] = in[4];
+	state[1][1] = in[5];
+	state[2][1] = in[6];
+	state[3][1] = in[7];
+	state[0][2] = in[8];
+	state[1][2] = in[9];
+	state[2][2] = in[10];
+	state[3][2] = in[11];
+	state[0][3] = in[12];
+	state[1][3] = in[13];
+	state[2][3] = in[14];
+	state[3][3] = in[15];
+
+	// Perform the necessary number of rounds. The round key is added first.
+	// The last round does not perform the MixColumns step.
+	if (keysize > 128) {
+		if (keysize > 192) {
+			AddRoundKey(state,&key[56]);
+			InvShiftRows(state);InvSubBytes(state);AddRoundKey(state,&key[52]);InvMixColumns(state);
+			InvShiftRows(state);InvSubBytes(state);AddRoundKey(state,&key[48]);InvMixColumns(state);
+		}
+		else {
+			AddRoundKey(state,&key[48]);
+		}
+		InvShiftRows(state);InvSubBytes(state);AddRoundKey(state,&key[44]);InvMixColumns(state);
+		InvShiftRows(state);InvSubBytes(state);AddRoundKey(state,&key[40]);InvMixColumns(state);
+	}
+	else {
+		AddRoundKey(state,&key[40]);
+	}
+	InvShiftRows(state);InvSubBytes(state);AddRoundKey(state,&key[36]);InvMixColumns(state);
+	InvShiftRows(state);InvSubBytes(state);AddRoundKey(state,&key[32]);InvMixColumns(state);
+	InvShiftRows(state);InvSubBytes(state);AddRoundKey(state,&key[28]);InvMixColumns(state);
+	InvShiftRows(state);InvSubBytes(state);AddRoundKey(state,&key[24]);InvMixColumns(state);
+	InvShiftRows(state);InvSubBytes(state);AddRoundKey(state,&key[20]);InvMixColumns(state);
+	InvShiftRows(state);InvSubBytes(state);AddRoundKey(state,&key[16]);InvMixColumns(state);
+	InvShiftRows(state);InvSubBytes(state);AddRoundKey(state,&key[12]);InvMixColumns(state);
+	InvShiftRows(state);InvSubBytes(state);AddRoundKey(state,&key[8]);InvMixColumns(state);
+	InvShiftRows(state);InvSubBytes(state);AddRoundKey(state,&key[4]);InvMixColumns(state);
+	InvShiftRows(state);InvSubBytes(state);AddRoundKey(state,&key[0]);
+
+	// Copy the state to the output array.
+	out[0] = state[0][0];
+	out[1] = state[1][0];
+	out[2] = state[2][0];
+	out[3] = state[3][0];
+	out[4] = state[0][1];
+	out[5] = state[1][1];
+	out[6] = state[2][1];
+	out[7] = state[3][1];
+	out[8] = state[0][2];
+	out[9] = state[1][2];
+	out[10] = state[2][2];
+	out[11] = state[3][2];
+	out[12] = state[0][3];
+	out[13] = state[1][3];
+	out[14] = state[2][3];
+	out[15] = state[3][3];
+}
 
 // Performs the AddRoundKey step. Each round has its own pre-generated 16-byte key in the
 // form of 4 integers (the "w" array). Each integer is XOR'd by one column of the state.
@@ -440,6 +527,95 @@ void MixColumns(BYTE state[4][4])
 	state[3][3] ^= gf_mul[col[3]][0];
 }
 
+__device__ void InvMixColumns(BYTE state[4][4])
+{
+	BYTE col[4];
+
+	// Column 1
+	col[0] = state[0][0];
+	col[1] = state[1][0];
+	col[2] = state[2][0];
+	col[3] = state[3][0];
+	state[0][0] = gf_mul[col[0]][5];
+	state[0][0] ^= gf_mul[col[1]][3];
+	state[0][0] ^= gf_mul[col[2]][4];
+	state[0][0] ^= gf_mul[col[3]][2];
+	state[1][0] = gf_mul[col[0]][2];
+	state[1][0] ^= gf_mul[col[1]][5];
+	state[1][0] ^= gf_mul[col[2]][3];
+	state[1][0] ^= gf_mul[col[3]][4];
+	state[2][0] = gf_mul[col[0]][4];
+	state[2][0] ^= gf_mul[col[1]][2];
+	state[2][0] ^= gf_mul[col[2]][5];
+	state[2][0] ^= gf_mul[col[3]][3];
+	state[3][0] = gf_mul[col[0]][3];
+	state[3][0] ^= gf_mul[col[1]][4];
+	state[3][0] ^= gf_mul[col[2]][2];
+	state[3][0] ^= gf_mul[col[3]][5];
+	// Column 2
+	col[0] = state[0][1];
+	col[1] = state[1][1];
+	col[2] = state[2][1];
+	col[3] = state[3][1];
+	state[0][1] = gf_mul[col[0]][5];
+	state[0][1] ^= gf_mul[col[1]][3];
+	state[0][1] ^= gf_mul[col[2]][4];
+	state[0][1] ^= gf_mul[col[3]][2];
+	state[1][1] = gf_mul[col[0]][2];
+	state[1][1] ^= gf_mul[col[1]][5];
+	state[1][1] ^= gf_mul[col[2]][3];
+	state[1][1] ^= gf_mul[col[3]][4];
+	state[2][1] = gf_mul[col[0]][4];
+	state[2][1] ^= gf_mul[col[1]][2];
+	state[2][1] ^= gf_mul[col[2]][5];
+	state[2][1] ^= gf_mul[col[3]][3];
+	state[3][1] = gf_mul[col[0]][3];
+	state[3][1] ^= gf_mul[col[1]][4];
+	state[3][1] ^= gf_mul[col[2]][2];
+	state[3][1] ^= gf_mul[col[3]][5];
+	// Column 3
+	col[0] = state[0][2];
+	col[1] = state[1][2];
+	col[2] = state[2][2];
+	col[3] = state[3][2];
+	state[0][2] = gf_mul[col[0]][5];
+	state[0][2] ^= gf_mul[col[1]][3];
+	state[0][2] ^= gf_mul[col[2]][4];
+	state[0][2] ^= gf_mul[col[3]][2];
+	state[1][2] = gf_mul[col[0]][2];
+	state[1][2] ^= gf_mul[col[1]][5];
+	state[1][2] ^= gf_mul[col[2]][3];
+	state[1][2] ^= gf_mul[col[3]][4];
+	state[2][2] = gf_mul[col[0]][4];
+	state[2][2] ^= gf_mul[col[1]][2];
+	state[2][2] ^= gf_mul[col[2]][5];
+	state[2][2] ^= gf_mul[col[3]][3];
+	state[3][2] = gf_mul[col[0]][3];
+	state[3][2] ^= gf_mul[col[1]][4];
+	state[3][2] ^= gf_mul[col[2]][2];
+	state[3][2] ^= gf_mul[col[3]][5];
+	// Column 4
+	col[0] = state[0][3];
+	col[1] = state[1][3];
+	col[2] = state[2][3];
+	col[3] = state[3][3];
+	state[0][3] = gf_mul[col[0]][5];
+	state[0][3] ^= gf_mul[col[1]][3];
+	state[0][3] ^= gf_mul[col[2]][4];
+	state[0][3] ^= gf_mul[col[3]][2];
+	state[1][3] = gf_mul[col[0]][2];
+	state[1][3] ^= gf_mul[col[1]][5];
+	state[1][3] ^= gf_mul[col[2]][3];
+	state[1][3] ^= gf_mul[col[3]][4];
+	state[2][3] = gf_mul[col[0]][4];
+	state[2][3] ^= gf_mul[col[1]][2];
+	state[2][3] ^= gf_mul[col[2]][5];
+	state[2][3] ^= gf_mul[col[3]][3];
+	state[3][3] = gf_mul[col[0]][3];
+	state[3][3] ^= gf_mul[col[1]][4];
+	state[3][3] ^= gf_mul[col[2]][2];
+	state[3][3] ^= gf_mul[col[3]][5];
+}
 
 // Performs the ShiftRows step. All rows are shifted cylindrically to the left.
 __device__ void ShiftRows(BYTE state[4][4])
@@ -467,6 +643,31 @@ __device__ void ShiftRows(BYTE state[4][4])
 	state[3][1] = t;
 }
 
+// All rows are shifted cylindrically to the right.
+__device__ void InvShiftRows(BYTE state[4][4])
+{
+	int t;
+
+	// Shift right by 1
+	t = state[1][3];
+	state[1][3] = state[1][2];
+	state[1][2] = state[1][1];
+	state[1][1] = state[1][0];
+	state[1][0] = t;
+	// Shift right by 2
+	t = state[2][3];
+	state[2][3] = state[2][1];
+	state[2][1] = t;
+	t = state[2][2];
+	state[2][2] = state[2][0];
+	state[2][0] = t;
+	// Shift right by 3
+	t = state[3][3];
+	state[3][3] = state[3][0];
+	state[3][0] = state[3][1];
+	state[3][1] = state[3][2];
+	state[3][2] = t;
+}
 
 // Performs the SubBytes step. All bytes in the state are substituted with a
 // pre-calculated value from a lookup table.
@@ -489,6 +690,25 @@ __device__ void SubBytes(BYTE state[4][4])
 	state[3][2] = d_aes_sbox[state[3][2] >> 4][state[3][2] & 0x0F];
 	state[3][3] = d_aes_sbox[state[3][3] >> 4][state[3][3] & 0x0F];
 }
+__device__ void InvSubBytes(BYTE state[4][4])
+{
+	state[0][0] = aes_invsbox[state[0][0] >> 4][state[0][0] & 0x0F];
+	state[0][1] = aes_invsbox[state[0][1] >> 4][state[0][1] & 0x0F];
+	state[0][2] = aes_invsbox[state[0][2] >> 4][state[0][2] & 0x0F];
+	state[0][3] = aes_invsbox[state[0][3] >> 4][state[0][3] & 0x0F];
+	state[1][0] = aes_invsbox[state[1][0] >> 4][state[1][0] & 0x0F];
+	state[1][1] = aes_invsbox[state[1][1] >> 4][state[1][1] & 0x0F];
+	state[1][2] = aes_invsbox[state[1][2] >> 4][state[1][2] & 0x0F];
+	state[1][3] = aes_invsbox[state[1][3] >> 4][state[1][3] & 0x0F];
+	state[2][0] = aes_invsbox[state[2][0] >> 4][state[2][0] & 0x0F];
+	state[2][1] = aes_invsbox[state[2][1] >> 4][state[2][1] & 0x0F];
+	state[2][2] = aes_invsbox[state[2][2] >> 4][state[2][2] & 0x0F];
+	state[2][3] = aes_invsbox[state[2][3] >> 4][state[2][3] & 0x0F];
+	state[3][0] = aes_invsbox[state[3][0] >> 4][state[3][0] & 0x0F];
+	state[3][1] = aes_invsbox[state[3][1] >> 4][state[3][1] & 0x0F];
+	state[3][2] = aes_invsbox[state[3][2] >> 4][state[3][2] & 0x0F];
+	state[3][3] = aes_invsbox[state[3][3] >> 4][state[3][3] & 0x0F];
+}
 
 
 int main(int argc, char **argv)
@@ -503,42 +723,16 @@ int main(int argc, char **argv)
 		if(argc == ARGC_FOR_ENCRYPT)
 		{
 			char *fileName = argv[2];
-
-			//Open the file for reading
-			struct _stat stat;
-			_stat(fileName,&stat);
-			long fileSize = stat.st_size;
-			FILE *fp_in = fopen(fileName , "r");
-			char *newFileName = "out.txt";
-			FILE *fp_out = fopen(newFileName, "ab");
-			char *h_chunkData;
-
-			//Create the key schedule
-			BYTE key[16] = {'S', 'E', 'C', 'R', 'E', 'T', ' ', 'K', 'E', 'Y', ' ', 'V', 'A', 'L', 'U', 'E'};
-			getKeySchedule(key);
-	
-			//Each kernel launch can handle 512 threads each operating on DES_BLOCKSIZE bytes
-			///So read the file in DES_BLOCKSIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH chunks
-			if(fp_in && &stat)
-			{
-				int chunkSize = AES_BLOCK_SIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH;
-				h_chunkData = (char *)malloc(chunkSize);
-				//Read the file in 1 chunk at a time, until fread returns something other than the chunk size
-				int lastChunkSize;
-				do
-				{
-					lastChunkSize = fread(h_chunkData, 1, chunkSize, fp_in);
-					launchKernel(h_chunkData, lastChunkSize, fp_out);
-				}
-				while(lastChunkSize == chunkSize);
-				fclose(fp_in);
-		
-			}
+			launchKernel(fileName, &cuda_aes_encrypt);
 		}
 	}
 	else if(strcmpi(operation, "decrypt") == 0)
 	{
-
+		if(argc == ARGC_FOR_DECRYPT)
+		{
+			char *fileName = argv[2];
+			launchKernel(fileName, &cuda_aes_decrypt);
+		}
 	}
 	else
 	{
@@ -548,15 +742,43 @@ int main(int argc, char **argv)
     return 0;
 }
 
-///Allocate device memory and invoke kernel, writing results to file
-void launchKernel(char *h_chunk, int chunkSize, FILE *fp_out)
+///Read input file, allocate device memory and invoke specified kernel, writing results to file
+void launchKernel(char *fileName, void(*kernel)(BYTE*, BYTE*,int))
 {
-	char *d_chunk = NULL;
-	cudaMalloc((void **) &d_chunk, chunkSize);
-	cudaMemcpy(d_chunk, h_chunk, chunkSize, cudaMemcpyHostToDevice);
-	aesBlockOperation<<<BLOCKS_PER_LAUNCH, THREADS_PER_BLOCK>>>((BYTE *)d_chunk, (BYTE *)d_chunk, chunkSize);
-	cudaMemcpy(h_chunk, d_chunk, chunkSize, cudaMemcpyDeviceToHost);
-	fwrite(h_chunk, chunkSize, 1, fp_out);
+	//Open the file for reading
+	struct _stat stat;
+	_stat(fileName,&stat);
+	long fileSize = stat.st_size;
+	FILE *fp_in = fopen(fileName , "r");
+	char *newFileName = "out.txt";
+	FILE *fp_out = fopen(newFileName, "ab");
+	char *h_chunkData;
+
+	//Create the key schedule
+	BYTE key[16] = {'S', 'E', 'C', 'R', 'E', 'T', ' ', 'K', 'E', 'Y', ' ', 'V', 'A', 'L', 'U', 'E'};
+	getKeySchedule(key);
+	
+	//Each kernel launch can handle 512 threads each operating on DES_BLOCKSIZE bytes
+	///So read the file in DES_BLOCKSIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH chunks
+	if(fp_in && &stat)
+	{
+		int chunkSize = AES_BLOCK_SIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH;
+		h_chunkData = (char *)malloc(chunkSize);
+		//Read the file in 1 chunk at a time, until fread returns something other than the chunk size
+		int lastChunkSize;
+		do
+		{
+			lastChunkSize = fread(h_chunkData, 1, chunkSize, fp_in);
+			char *d_chunk = NULL;
+			cudaMalloc((void **) &d_chunk, lastChunkSize);
+			cudaMemcpy(d_chunk, h_chunkData, lastChunkSize, cudaMemcpyHostToDevice);
+			kernel<<<BLOCKS_PER_LAUNCH, THREADS_PER_BLOCK>>>((BYTE *)d_chunk, (BYTE *)d_chunk, chunkSize);
+			cudaMemcpy(h_chunkData, d_chunk, lastChunkSize, cudaMemcpyDeviceToHost);
+			fwrite(h_chunkData, lastChunkSize, 1, fp_out);
+		}
+		while(lastChunkSize == chunkSize);
+		fclose(fp_in);
+	}
 }
 
 void getKeySchedule(BYTE *key)
