@@ -17,11 +17,21 @@
 #define ARGC_FOR_ENCRYPT 3
 #define ARGC_FOR_DECRYPT 3
 
+#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, char *file, int line, bool abort=true)
+{
+   if (code != cudaSuccess) 
+   {
+      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
+
 /**************************** DATA TYPES ****************************/
 typedef unsigned char BYTE;            // 8-bit byte
 typedef unsigned int WORD;             // 32-bit word, change to "long" for 16-bit machines
 
-void launchKernel(char *fileName, void(*kernel)(BYTE*, BYTE*, int));
+void launchKernel(char *inFileName, char *outFileName, void(*kernel)(BYTE*, BYTE*, int));
 __device__ void AddRoundKey(BYTE state[4][4], const WORD w[]);
 
 __device__ void SubBytes(BYTE state[4][4]);
@@ -35,6 +45,10 @@ __device__ void InvMixColumns(BYTE state[4][4]);
 
 __device__ void aes_encrypt(const BYTE in[], BYTE out[], const WORD key[], int keysize);
 __device__ void aes_decrypt(const BYTE in[], BYTE out[], const WORD key[], int keysize);
+
+__global__ void cuda_aes_encrypt(BYTE *in, BYTE *out, int n);
+__global__ void cuda_aes_decrypt(BYTE *in, BYTE *out, int n);
+
 void aes_key_setup(const BYTE key[], WORD w[], int keysize);
 void getKeySchedule(BYTE *key);
 WORD SubWord(WORD word);
@@ -718,20 +732,29 @@ int main(int argc, char **argv)
 	
 	//Parse command line arguments
 	char *operation = argv[1];
-	if(strcmpi(operation, "encrypt") == 0)
+	//char *operation = "decrypt";
+	if(stricmp(operation, "encrypt") == 0)
 	{
 		if(argc == ARGC_FOR_ENCRYPT)
 		{
 			char *fileName = argv[2];
-			launchKernel(fileName, &cuda_aes_encrypt);
+			//char *fileName = "starwars.txt";
+			char *newFileName = (char *) malloc(strlen(fileName) + 5);
+			strcpy(newFileName, fileName);
+			strcat(newFileName, ".enc");
+			launchKernel(fileName, newFileName, &cuda_aes_encrypt);
 		}
 	}
-	else if(strcmpi(operation, "decrypt") == 0)
+	else if(stricmp(operation, "decrypt") == 0)
 	{
 		if(argc == ARGC_FOR_DECRYPT)
 		{
 			char *fileName = argv[2];
-			launchKernel(fileName, &cuda_aes_decrypt);
+			//char *fileName = "starwars.txt.enc";
+			char *newFileName = (char *) malloc(strlen(fileName) + 5);
+			strcpy(newFileName, fileName);
+			strcat(newFileName, ".dec");
+			launchKernel(fileName, newFileName, &cuda_aes_decrypt);
 		}
 	}
 	else
@@ -743,15 +766,15 @@ int main(int argc, char **argv)
 }
 
 ///Read input file, allocate device memory and invoke specified kernel, writing results to file
-void launchKernel(char *fileName, void(*kernel)(BYTE*, BYTE*,int))
+void launchKernel(char *inFileName, char *outFileName, void(*kernel)(BYTE*, BYTE*,int))
 {
 	//Open the file for reading
 	struct _stat stat;
-	_stat(fileName,&stat);
+	_stat(inFileName,&stat);
 	long fileSize = stat.st_size;
-	FILE *fp_in = fopen(fileName , "r");
-	char *newFileName = "out.txt";
-	FILE *fp_out = fopen(newFileName, "ab");
+	FILE *fp_in = fopen(inFileName , "rb");
+	
+	FILE *fp_out = fopen(outFileName, "ab");
 	char *h_chunkData;
 
 	//Create the key schedule
@@ -770,10 +793,11 @@ void launchKernel(char *fileName, void(*kernel)(BYTE*, BYTE*,int))
 		{
 			lastChunkSize = fread(h_chunkData, 1, chunkSize, fp_in);
 			char *d_chunk = NULL;
-			cudaMalloc((void **) &d_chunk, lastChunkSize);
-			cudaMemcpy(d_chunk, h_chunkData, lastChunkSize, cudaMemcpyHostToDevice);
+			gpuErrchk(cudaMalloc((void **) &d_chunk, lastChunkSize));
+			gpuErrchk(cudaMemcpy(d_chunk, h_chunkData, lastChunkSize, cudaMemcpyHostToDevice));
 			kernel<<<BLOCKS_PER_LAUNCH, THREADS_PER_BLOCK>>>((BYTE *)d_chunk, (BYTE *)d_chunk, chunkSize);
-			cudaMemcpy(h_chunkData, d_chunk, lastChunkSize, cudaMemcpyDeviceToHost);
+			gpuErrchk(cudaPeekAtLastError());
+			gpuErrchk(cudaMemcpy(h_chunkData, d_chunk, lastChunkSize, cudaMemcpyDeviceToHost));
 			fwrite(h_chunkData, lastChunkSize, 1, fp_out);
 		}
 		while(lastChunkSize == chunkSize);
