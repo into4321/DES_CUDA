@@ -18,6 +18,7 @@
 #define ARGC_FOR_DECRYPT 3
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+//Function wrapper for CUDA API that provides error checking
 inline void gpuAssert(cudaError_t code, char *file, int line, bool abort=true)
 {
    if (code != cudaSuccess) 
@@ -51,12 +52,11 @@ __global__ void cuda_aes_decrypt(BYTE *in, BYTE *out, int n);
 
 void aes_key_setup(const BYTE key[], WORD w[], int keysize);
 void getKeySchedule(BYTE *key);
+void pad(char *chunk, int lastBlockSize);
 WORD SubWord(WORD word);
 __device__ WORD *d_keySchedule;
 
-__device__ BYTE d_aes_sbox[16][16];
-
-static const BYTE aes_sbox[16][16] = {
+__device__ static const BYTE d_aes_sbox[16][16] = {
 	{0x63,0x7C,0x77,0x7B,0xF2,0x6B,0x6F,0xC5,0x30,0x01,0x67,0x2B,0xFE,0xD7,0xAB,0x76},
 	{0xCA,0x82,0xC9,0x7D,0xFA,0x59,0x47,0xF0,0xAD,0xD4,0xA2,0xAF,0x9C,0xA4,0x72,0xC0},
 	{0xB7,0xFD,0x93,0x26,0x36,0x3F,0xF7,0xCC,0x34,0xA5,0xE5,0xF1,0x71,0xD8,0x31,0x15},
@@ -451,7 +451,7 @@ __device__ void AddRoundKey(BYTE state[4][4], const WORD w[])
 // multiplication in a Galios Field 2^8. All multiplication is pre-computed in a table.
 // Addition is equivilent to XOR. (Must always make a copy of the column as the original
 // values will be destoyed.)
-void MixColumns(BYTE state[4][4])
+__device__ void MixColumns(BYTE state[4][4])
 {
 	BYTE col[4];
 
@@ -727,18 +727,15 @@ __device__ void InvSubBytes(BYTE state[4][4])
 
 int main(int argc, char **argv)
 {
-	//copy the s-boxes to the device
-	cudaError_t result = cudaMemcpyToSymbol(d_aes_sbox, aes_sbox, sizeof(BYTE)*16*16);
+	
 	
 	//Parse command line arguments
 	char *operation = argv[1];
-	//char *operation = "decrypt";
 	if(stricmp(operation, "encrypt") == 0)
 	{
 		if(argc == ARGC_FOR_ENCRYPT)
 		{
 			char *fileName = argv[2];
-			//char *fileName = "starwars.txt";
 			char *newFileName = (char *) malloc(strlen(fileName) + 5);
 			strcpy(newFileName, fileName);
 			strcat(newFileName, ".enc");
@@ -750,7 +747,6 @@ int main(int argc, char **argv)
 		if(argc == ARGC_FOR_DECRYPT)
 		{
 			char *fileName = argv[2];
-			//char *fileName = "starwars.txt.enc";
 			char *newFileName = (char *) malloc(strlen(fileName) + 5);
 			strcpy(newFileName, fileName);
 			strcat(newFileName, ".dec");
@@ -781,8 +777,8 @@ void launchKernel(char *inFileName, char *outFileName, void(*kernel)(BYTE*, BYTE
 	BYTE key[16] = {'S', 'E', 'C', 'R', 'E', 'T', ' ', 'K', 'E', 'Y', ' ', 'V', 'A', 'L', 'U', 'E'};
 	getKeySchedule(key);
 	
-	//Each kernel launch can handle 512 threads each operating on DES_BLOCKSIZE bytes
-	///So read the file in DES_BLOCKSIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH chunks
+	//Each kernel launch can handle 512 threads each operating on AES_BLOCKSIZE bytes
+	///So read the file in AES_BLOCKSIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH chunks
 	if(fp_in && &stat)
 	{
 		int chunkSize = AES_BLOCK_SIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH;
@@ -792,16 +788,33 @@ void launchKernel(char *inFileName, char *outFileName, void(*kernel)(BYTE*, BYTE
 		do
 		{
 			lastChunkSize = fread(h_chunkData, 1, chunkSize, fp_in);
+			//Pad the last block if its size is not a multiple of the block size
+			int lastBlockRemainder = lastChunkSize % AES_BLOCK_SIZE;
+			if (lastBlockRemainder > 0)
+			{
+				pad(h_chunkData + lastChunkSize - lastBlockRemainder, lastBlockRemainder);
+			}
 			char *d_chunk = NULL;
+			lastChunkSize += ((AES_BLOCK_SIZE - lastBlockRemainder) % AES_BLOCK_SIZE);
 			gpuErrchk(cudaMalloc((void **) &d_chunk, lastChunkSize));
 			gpuErrchk(cudaMemcpy(d_chunk, h_chunkData, lastChunkSize, cudaMemcpyHostToDevice));
 			kernel<<<BLOCKS_PER_LAUNCH, THREADS_PER_BLOCK>>>((BYTE *)d_chunk, (BYTE *)d_chunk, chunkSize);
 			gpuErrchk(cudaPeekAtLastError());
 			gpuErrchk(cudaMemcpy(h_chunkData, d_chunk, lastChunkSize, cudaMemcpyDeviceToHost));
+			gpuErrchk(cudaFree(d_chunk));
 			fwrite(h_chunkData, lastChunkSize, 1, fp_out);
 		}
 		while(lastChunkSize == chunkSize);
 		fclose(fp_in);
+	}
+}
+
+void pad(char *chunk, int lastBlockRemainder)
+{
+	//Pad zeros on the last (blocksize - remainder) bytes
+	for (int i = 15; i >= lastBlockRemainder; i--)
+	{
+		chunk[i] = 0x00;
 	}
 }
 
@@ -821,9 +834,9 @@ void getKeySchedule(BYTE *key)
 
 	WORD *d_keySchedule_data = NULL;
 	//cudaMemcpyToSymbol(d_keySchedule, keySchedule, Nr * sizeof(WORD));
-	cudaMalloc((void **)&d_keySchedule_data, keyScheduleSize*sizeof(WORD));
-	cudaMemcpy(d_keySchedule_data, keySchedule, keyScheduleSize*sizeof(WORD), cudaMemcpyHostToDevice);
-	cudaMemcpyToSymbol(d_keySchedule, &d_keySchedule_data, sizeof(WORD *));
+	gpuErrchk(cudaMalloc((void **)&d_keySchedule_data, keyScheduleSize*sizeof(WORD)));
+	gpuErrchk(cudaMemcpy(d_keySchedule_data, keySchedule, keyScheduleSize*sizeof(WORD), cudaMemcpyHostToDevice));
+	gpuErrchk(cudaMemcpyToSymbol(d_keySchedule, &d_keySchedule_data, sizeof(WORD *)));
 }
 
 // Performs the action of generating the keys that will be used in every round of
@@ -860,6 +873,9 @@ void aes_key_setup(const BYTE key[], WORD w[], int keysize)
 // Substitutes a word using the AES S-Box.
 WORD SubWord(WORD word)
 {
+	BYTE aes_sbox[16][16];
+	//Get the aes s-box from the device
+	cudaMemcpy(aes_sbox, d_aes_sbox, (sizeof(BYTE)*16*16), cudaMemcpyDeviceToHost);
 	unsigned int result;
 
 	result = (int)aes_sbox[(word >> 4) & 0x0000000F][word & 0x0000000F];
