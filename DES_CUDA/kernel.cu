@@ -14,8 +14,7 @@
 #define MAX(X,Y) ((X) > (Y) ? (X) : (Y))
 #define KE_ROTWORD(x) (((x) << 8) | ((x) >> 24))
 
-#define ARGC_FOR_ENCRYPT 3
-#define ARGC_FOR_DECRYPT 3
+#define CORRECT_ARGC 4
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 //Function wrapper for CUDA API that provides error checking
@@ -28,11 +27,18 @@ inline void gpuAssert(cudaError_t code, char *file, int line, bool abort=true)
    }
 }
 
+typedef enum 
+{
+	CTR,
+	ECB_ENCRYPT,
+	ECB_DECRYPT
+} Operation;
+
 /**************************** DATA TYPES ****************************/
 typedef unsigned char BYTE;            // 8-bit byte
 typedef unsigned int WORD;             // 32-bit word, change to "long" for 16-bit machines
 
-void launchKernel(char *inFileName, char *outFileName, void(*kernel)(BYTE*, BYTE*, int));
+void launchKernel(char *inFileName, char *outFileName, Operation operation);
 __device__ void AddRoundKey(BYTE state[4][4], const WORD w[]);
 
 __device__ void SubBytes(BYTE state[4][4]);
@@ -46,9 +52,11 @@ __device__ void InvMixColumns(BYTE state[4][4]);
 
 __device__ void aes_encrypt(const BYTE in[], BYTE out[], const WORD key[], int keysize);
 __device__ void aes_decrypt(const BYTE in[], BYTE out[], const WORD key[], int keysize);
+__device__ void aes_encrypt_ctr(const BYTE in[], BYTE out[], const WORD key[], int keysize, int counter);
 
 __global__ void cuda_aes_encrypt(BYTE *in, BYTE *out, int n);
 __global__ void cuda_aes_decrypt(BYTE *in, BYTE *out, int n);
+__global__ void cuda_aes_encrypt_ctr(BYTE *in, BYTE *out, int n, int counter);
 
 void aes_key_setup(const BYTE key[], WORD w[], int keysize);
 void getKeySchedule(BYTE *key);
@@ -231,10 +239,21 @@ __device__ static const BYTE gf_mul[256][6] = {
 	{0xe7,0x19,0x4f,0xa8,0x9a,0x83},{0xe5,0x1a,0x46,0xa3,0x97,0x8d}
 };
 
+__device__ static const BYTE iv[AES_BLOCK_SIZE] = {0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x00};
+__global__ void cuda_aes_encrypt_ctr(BYTE *in, BYTE *out, int n, int counter)
+{
+	//Map the thread id and block id to the AES block
+	int i = ((blockIdx.x * THREADS_PER_BLOCK) + threadIdx.x) * AES_BLOCK_SIZE;
+	if(i < n)
+	{
+		//Call the encrypt function on the current 16-byte block
+		aes_encrypt_ctr(&in[i], &out[i], d_keySchedule, 128, counter);
+	}
+}
 
 __global__ void cuda_aes_encrypt(BYTE *in, BYTE *out, int n)
 {
-	//Map the thread id and block id to the DES block
+	//Map the thread id and block id to the AES block
 	int i = ((blockIdx.x * THREADS_PER_BLOCK) + threadIdx.x) * AES_BLOCK_SIZE;
 	if(i < n)
 	{
@@ -245,7 +264,7 @@ __global__ void cuda_aes_encrypt(BYTE *in, BYTE *out, int n)
 
 __global__ void cuda_aes_decrypt(BYTE *in, BYTE *out, int n)
 {
-	//Map the thread id and block id to the DES block
+	//Map the thread id and block id to the AES block
 	int i = ((blockIdx.x * THREADS_PER_BLOCK) + threadIdx.x) * AES_BLOCK_SIZE;
 	if(i < n)
 	{
@@ -256,6 +275,32 @@ __global__ void cuda_aes_decrypt(BYTE *in, BYTE *out, int n)
 /////////////////
 // (En/De)Crypt
 /////////////////
+
+__device__ void aes_encrypt_ctr(const BYTE in[], BYTE out[], const WORD key[], int keysize, int counter)
+{
+	//Calculate the IV offset from the block and thread indices
+	int offset = (blockIdx.x * THREADS_PER_BLOCK) + threadIdx.x + counter;
+	//Add the offset to the IV byte by byte
+	short idx, c = 0;
+	BYTE iv_new[AES_BLOCK_SIZE];
+	for(idx = AES_BLOCK_SIZE - 1; idx >= 0; idx--)
+	{
+		short shift = (AES_BLOCK_SIZE - (idx+1)) * 8;
+		//First operand is the current byte of the IV
+		BYTE op1 = iv[idx];
+		//Second operand is the current byte of the offset
+		BYTE op2 = ((offset &(0xff << shift)) >> shift);
+		iv_new[idx] = op1 + op2 + c;
+		c = (iv_new[idx] > op1 && iv_new[idx] > op2) ? 0 : 1;
+	}
+	//Encrypt the IV
+	aes_encrypt(iv_new, iv_new, key, keysize);
+	//XOR the encrypted incremented IV with the message block
+	for(idx = AES_BLOCK_SIZE - 1; idx >= 0; idx--)
+	{
+		out[idx] = iv_new[idx] ^ in[idx];
+	}
+}
 
 __device__ void aes_encrypt(const BYTE in[], BYTE out[], const WORD key[], int keysize)
 {
@@ -727,50 +772,52 @@ __device__ void InvSubBytes(BYTE state[4][4])
 
 int main(int argc, char **argv)
 {
-	
-	
 	//Parse command line arguments
-	char *operation = argv[1];
-	if(stricmp(operation, "encrypt") == 0)
+	if(argc != CORRECT_ARGC)
 	{
-		if(argc == ARGC_FOR_ENCRYPT)
-		{
-			char *fileName = argv[2];
-			char *newFileName = (char *) malloc(strlen(fileName) + 5);
-			strcpy(newFileName, fileName);
-			strcat(newFileName, ".enc");
-			launchKernel(fileName, newFileName, &cuda_aes_encrypt);
-		}
-	}
-	else if(stricmp(operation, "decrypt") == 0)
-	{
-		if(argc == ARGC_FOR_DECRYPT)
-		{
-			char *fileName = argv[2];
-			char *newFileName = (char *) malloc(strlen(fileName) + 5);
-			strcpy(newFileName, fileName);
-			strcat(newFileName, ".dec");
-			launchKernel(fileName, newFileName, &cuda_aes_decrypt);
-		}
+		printf("Insufficient parameters specified. The correct format is %s [ecb_encrypt|ecb_decrypt|ctr] [INPUT FILE] [KEY FILE]\n", argv[0]);
 	}
 	else
 	{
-		puts("Invalid operation specified. Valid choices are \"encrypt\" and \"decrypt\".");
+		char *operation = argv[1];
+		char *inputFilename = argv[2];
+		
+		char *keyFilename = argv[3];
+		if(stricmp(operation, "ecb_encrypt") == 0)
+		{
+			launchKernel(inputFilename, keyFilename, ECB_ENCRYPT);
+		}
+		else if(stricmp(operation, "ecb_decrypt") == 0)
+		{
+			launchKernel(inputFilename, keyFilename, ECB_DECRYPT);
+		}
+		else if(stricmp(operation, "ctr") == 0)
+		{
+			launchKernel(inputFilename, keyFilename, CTR);
+		}
+		else
+		{
+			printf("Invalid operation specified. Valid choices are \"ecb_encrypt\", \"ecb_decrypt\", and \"ctr\".");
+		}
 	}
-	
     return 0;
 }
 
 ///Read input file, allocate device memory and invoke specified kernel, writing results to file
-void launchKernel(char *inFileName, char *outFileName, void(*kernel)(BYTE*, BYTE*,int))
+void launchKernel(char *inFilename, char *keyFilename, Operation operation)
 {
 	//Open the file for reading
 	struct _stat stat;
-	_stat(inFileName,&stat);
+	_stat(inFilename,&stat);
 	long fileSize = stat.st_size;
-	FILE *fp_in = fopen(inFileName , "rb");
+
+	//Make output file name
+	char *outFilename = (char *)malloc(strlen(inFilename) + 4);
+	sprintf(outFilename, "%s.out", inFilename);
+
+	FILE *fp_in = fopen(inFilename , "rb");
 	
-	FILE *fp_out = fopen(outFileName, "ab");
+	FILE *fp_out = fopen(outFilename, "ab");
 	char *h_chunkData;
 
 	//Create the key schedule
@@ -785,6 +832,7 @@ void launchKernel(char *inFileName, char *outFileName, void(*kernel)(BYTE*, BYTE
 		h_chunkData = (char *)malloc(chunkSize);
 		//Read the file in 1 chunk at a time, until fread returns something other than the chunk size
 		int lastChunkSize;
+		int counter = 0;
 		do
 		{
 			lastChunkSize = fread(h_chunkData, 1, chunkSize, fp_in);
@@ -798,11 +846,28 @@ void launchKernel(char *inFileName, char *outFileName, void(*kernel)(BYTE*, BYTE
 			lastChunkSize += ((AES_BLOCK_SIZE - lastBlockRemainder) % AES_BLOCK_SIZE);
 			gpuErrchk(cudaMalloc((void **) &d_chunk, lastChunkSize));
 			gpuErrchk(cudaMemcpy(d_chunk, h_chunkData, lastChunkSize, cudaMemcpyHostToDevice));
-			kernel<<<BLOCKS_PER_LAUNCH, THREADS_PER_BLOCK>>>((BYTE *)d_chunk, (BYTE *)d_chunk, chunkSize);
-			gpuErrchk(cudaPeekAtLastError());
+
+			switch (operation)
+			{
+			case CTR:
+				cuda_aes_encrypt_ctr<<<BLOCKS_PER_LAUNCH, THREADS_PER_BLOCK>>>((BYTE *)d_chunk, (BYTE *)d_chunk, chunkSize, counter);
+				break;
+			case ECB_ENCRYPT:
+				cuda_aes_encrypt<<<BLOCKS_PER_LAUNCH, THREADS_PER_BLOCK>>>((BYTE *)d_chunk, (BYTE *)d_chunk, chunkSize);
+				break;
+			case ECB_DECRYPT:
+				cuda_aes_decrypt<<<BLOCKS_PER_LAUNCH, THREADS_PER_BLOCK>>>((BYTE *)d_chunk, (BYTE *)d_chunk, chunkSize);
+				break;
+			default:
+				break;
+			}
+			
+			//gpuErrchk(cudaPeekAtLastError());
 			gpuErrchk(cudaMemcpy(h_chunkData, d_chunk, lastChunkSize, cudaMemcpyDeviceToHost));
 			gpuErrchk(cudaFree(d_chunk));
 			fwrite(h_chunkData, lastChunkSize, 1, fp_out);
+			//Increment the counter by the number of blocks that got processed
+			counter += lastChunkSize / AES_BLOCK_SIZE;
 		}
 		while(lastChunkSize == chunkSize);
 		fclose(fp_in);
