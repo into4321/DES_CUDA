@@ -59,7 +59,7 @@ __global__ void cuda_aes_decrypt(BYTE *in, BYTE *out, int n);
 __global__ void cuda_aes_encrypt_ctr(BYTE *in, BYTE *out, int n, int counter);
 
 void aes_key_setup(const BYTE key[], WORD w[], int keysize);
-void getKeySchedule(BYTE *key);
+int getKeySchedule(char *keyFilename, Operation operation);
 void pad(char *chunk, int lastBlockSize);
 WORD SubWord(WORD word);
 __device__ WORD *d_keySchedule;
@@ -821,56 +821,60 @@ void launchKernel(char *inFilename, char *keyFilename, Operation operation)
 	char *h_chunkData;
 
 	//Create the key schedule
-	BYTE key[16] = {'S', 'E', 'C', 'R', 'E', 'T', ' ', 'K', 'E', 'Y', ' ', 'V', 'A', 'L', 'U', 'E'};
-	getKeySchedule(key);
-	
-	//Each kernel launch can handle 512 threads each operating on AES_BLOCKSIZE bytes
-	///So read the file in AES_BLOCKSIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH chunks
-	if(fp_in && &stat)
+	if(getKeySchedule(keyFilename, operation))
 	{
-		int chunkSize = AES_BLOCK_SIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH;
-		h_chunkData = (char *)malloc(chunkSize);
-		//Read the file in 1 chunk at a time, until fread returns something other than the chunk size
-		int lastChunkSize;
-		int counter = 0;
-		do
+		//Each kernel launch can handle 512 threads each operating on AES_BLOCKSIZE bytes
+		///So read the file in AES_BLOCKSIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH chunks
+		if(fp_in && &stat)
 		{
-			lastChunkSize = fread(h_chunkData, 1, chunkSize, fp_in);
-			//Pad the last block if its size is not a multiple of the block size
-			int lastBlockRemainder = lastChunkSize % AES_BLOCK_SIZE;
-			if (lastBlockRemainder > 0)
+			int chunkSize = AES_BLOCK_SIZE * THREADS_PER_BLOCK * BLOCKS_PER_LAUNCH;
+			h_chunkData = (char *)malloc(chunkSize);
+			//Read the file in 1 chunk at a time, until fread returns something other than the chunk size
+			int lastChunkSize;
+			int counter = 0;
+			do
 			{
-				pad(h_chunkData + lastChunkSize - lastBlockRemainder, lastBlockRemainder);
-			}
-			char *d_chunk = NULL;
-			lastChunkSize += ((AES_BLOCK_SIZE - lastBlockRemainder) % AES_BLOCK_SIZE);
-			gpuErrchk(cudaMalloc((void **) &d_chunk, lastChunkSize));
-			gpuErrchk(cudaMemcpy(d_chunk, h_chunkData, lastChunkSize, cudaMemcpyHostToDevice));
+				lastChunkSize = fread(h_chunkData, 1, chunkSize, fp_in);
+				//Pad the last block if its size is not a multiple of the block size
+				int lastBlockRemainder = lastChunkSize % AES_BLOCK_SIZE;
+				if (lastBlockRemainder > 0)
+				{
+					pad(h_chunkData + lastChunkSize - lastBlockRemainder, lastBlockRemainder);
+				}
+				char *d_chunk = NULL;
+				lastChunkSize += ((AES_BLOCK_SIZE - lastBlockRemainder) % AES_BLOCK_SIZE);
+				gpuErrchk(cudaMalloc((void **) &d_chunk, lastChunkSize));
+				gpuErrchk(cudaMemcpy(d_chunk, h_chunkData, lastChunkSize, cudaMemcpyHostToDevice));
 
-			switch (operation)
-			{
-			case CTR:
-				cuda_aes_encrypt_ctr<<<BLOCKS_PER_LAUNCH, THREADS_PER_BLOCK>>>((BYTE *)d_chunk, (BYTE *)d_chunk, chunkSize, counter);
-				break;
-			case ECB_ENCRYPT:
-				cuda_aes_encrypt<<<BLOCKS_PER_LAUNCH, THREADS_PER_BLOCK>>>((BYTE *)d_chunk, (BYTE *)d_chunk, chunkSize);
-				break;
-			case ECB_DECRYPT:
-				cuda_aes_decrypt<<<BLOCKS_PER_LAUNCH, THREADS_PER_BLOCK>>>((BYTE *)d_chunk, (BYTE *)d_chunk, chunkSize);
-				break;
-			default:
-				break;
-			}
+				switch (operation)
+				{
+				case CTR:
+					cuda_aes_encrypt_ctr<<<BLOCKS_PER_LAUNCH, THREADS_PER_BLOCK>>>((BYTE *)d_chunk, (BYTE *)d_chunk, chunkSize, counter);
+					break;
+				case ECB_ENCRYPT:
+					cuda_aes_encrypt<<<BLOCKS_PER_LAUNCH, THREADS_PER_BLOCK>>>((BYTE *)d_chunk, (BYTE *)d_chunk, chunkSize);
+					break;
+				case ECB_DECRYPT:
+					cuda_aes_decrypt<<<BLOCKS_PER_LAUNCH, THREADS_PER_BLOCK>>>((BYTE *)d_chunk, (BYTE *)d_chunk, chunkSize);
+					break;
+				default:
+					break;
+				}
 			
-			//gpuErrchk(cudaPeekAtLastError());
-			gpuErrchk(cudaMemcpy(h_chunkData, d_chunk, lastChunkSize, cudaMemcpyDeviceToHost));
-			gpuErrchk(cudaFree(d_chunk));
-			fwrite(h_chunkData, lastChunkSize, 1, fp_out);
-			//Increment the counter by the number of blocks that got processed
-			counter += lastChunkSize / AES_BLOCK_SIZE;
+				//gpuErrchk(cudaPeekAtLastError());
+				gpuErrchk(cudaMemcpy(h_chunkData, d_chunk, lastChunkSize, cudaMemcpyDeviceToHost));
+				gpuErrchk(cudaFree(d_chunk));
+				fwrite(h_chunkData, lastChunkSize, 1, fp_out);
+				//Increment the counter by the number of blocks that got processed
+				counter += lastChunkSize / AES_BLOCK_SIZE;
+			}
+			while(lastChunkSize == chunkSize);
+			fclose(fp_in);
 		}
-		while(lastChunkSize == chunkSize);
-		fclose(fp_in);
+	}
+	else
+	{
+		puts("Invalid key file");
 	}
 }
 
@@ -883,25 +887,41 @@ void pad(char *chunk, int lastBlockRemainder)
 	}
 }
 
-void getKeySchedule(BYTE *key)
+//Return 1 if successful, 0 otherwise
+int getKeySchedule(char *keyFilename, Operation operation)
 {
-	BYTE *out = (BYTE *)malloc(16 * sizeof(BYTE));
-	int keysize = 128;
+	FILE *fp = fopen(keyFilename, "rb");
+	//If CTR, read the IV from the first 16 bytes of the file
+	if (operation == CTR)
+	{
+		BYTE iv_file[16];
+		if(fread(iv_file, 1, AES_BLOCK_SIZE, fp) < AES_BLOCK_SIZE) return 0;
+		gpuErrchk(cudaMemcpyToSymbol(iv, iv_file, AES_BLOCK_SIZE));
+	}
+	//Allocate the maximum key size of 256 bits
+	BYTE *key = (BYTE *)malloc(32);
+	//If the key file is longer than 256 bits, the first 256 bits will be used
+	int keySize = fread(key, 1, 32, fp) * 8;
+
+	if(keySize != 128 && keySize != 192 && keySize != 256) return 0;
+
 	int Nr, Nk;
 	int Nb = 4;
 	int keyScheduleSize;
 	WORD *keySchedule;
-	Nk = keysize / 32;
+	Nk = keySize / 32;
 	Nr = 6 + MAX(Nb, Nk);
 	keyScheduleSize = Nb * (Nr + 1);
 	keySchedule = (WORD *)malloc(sizeof(WORD) * keyScheduleSize);
-	aes_key_setup(key, keySchedule, keysize);
+	aes_key_setup(key, keySchedule, keySize);
 
 	WORD *d_keySchedule_data = NULL;
 	//cudaMemcpyToSymbol(d_keySchedule, keySchedule, Nr * sizeof(WORD));
 	gpuErrchk(cudaMalloc((void **)&d_keySchedule_data, keyScheduleSize*sizeof(WORD)));
 	gpuErrchk(cudaMemcpy(d_keySchedule_data, keySchedule, keyScheduleSize*sizeof(WORD), cudaMemcpyHostToDevice));
 	gpuErrchk(cudaMemcpyToSymbol(d_keySchedule, &d_keySchedule_data, sizeof(WORD *)));
+
+	return 1;
 }
 
 // Performs the action of generating the keys that will be used in every round of
