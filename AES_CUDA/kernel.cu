@@ -826,7 +826,7 @@ void launchKernel(char *inFilename, char *keyFilename, Operation operation)
 {
 	//Open the file for reading
 	//Make output file name
-	char *outFilename = (char *)malloc(strlen(inFilename) + 4);
+	char *outFilename = (char *)malloc(strlen(inFilename) + 5);
 	sprintf(outFilename, "%s.out", inFilename);
 
 	FILE *fp_in = fopen(inFilename , "rb");
