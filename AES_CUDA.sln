@@ -1,7 +1,7 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio 2012
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "DES_CUDA", "DES_CUDA\DES_CUDA.vcxproj", "{D21709EC-0C37-4045-98AE-C11A8F343210}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "AES_CUDA", "AES_CUDA\AES_CUDA.vcxproj", "{D21709EC-0C37-4045-98AE-C11A8F343210}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
